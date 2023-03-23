@@ -1,0 +1,123 @@
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: tekton-gl-proto-template
+objects:
+- apiVersion: triggers.tekton.dev/v1beta1
+  kind: EventListener
+  metadata:
+    annotations:
+      triggers.tekton.dev/old-escape-quotes: 'true'
+    name: tekton-gl-proto-listener
+  spec:
+    triggers:
+    - triggerRef: tekton-gl-proto-trigger
+- apiVersion: triggers.tekton.dev/v1beta1
+  kind: Trigger
+  metadata:
+    name: tekton-gl-proto-trigger
+  spec:
+    interceptors:
+    - ref:
+        name: gitlab
+      params:
+      - name: secretRef
+        value:
+          secretName: tekton-gl-proto-secret
+          secretKey: pass
+        eventTypes:
+        - Push Hook
+        - Merge Request Hook
+    bindings:
+    - ref:
+        name: tekton-gl-proto-binding
+    template:
+      ref: tekton-gl-proto-trigger-template
+- apiVersion: triggers.tekton.dev/v1beta1
+  kind: TriggerBinding
+  metadata:
+    name: tekton-gl-proto-binding
+  # refer here: https://docs.gitlab.com/ee/user/project/integrations/webhook_events.html#push-events
+  # for what information gitlab sends in webhooks
+  spec:
+    params:
+    - name: event-type
+      value: $(body.event_type)
+    - name: project-id
+      value: $(body.project.id)
+    - name: push-ref
+      value: $(body.ref)
+    # https://docs.gitlab.com/ee/user/project/integrations/webhook_events.html#merge-request-events
+    - name: mr-oldrev
+      value: $(body.object_attributes.oldrev)
+    - name: mr-iid
+      value: $(body.object_attributes.iid)
+    - name: 
+- apiVersion: triggers.tekton.dev/v1beta1
+  kind: TriggerTemplate
+  metadata:
+    name: tekton-gl-proto-trigger-template
+  spec:
+    params:
+    - name: event-type
+      description: merge_request or push
+      default: invalid
+    - name: project-id
+      description: The GitLab project id
+    - name: push-ref
+      description: Ref including branch
+    - name: mr-oldrev
+      description: Is only available if there are actual code changes to the MR
+    - name: mr-iid
+      description: Internal ID for the merge request
+    resourceTemplates:
+    - apiVersion: tekton.dev/v1beta1
+      kind: PipelineRun
+      metadata:
+        name: tekton-gl-proto-pipelinerun-$(uid)
+      spec:
+        params:
+        - name: event-type
+          value: $(tt.params.event-type)
+        - name: project-id
+          value: $(tt.params.project-id)
+        - name: push-ref
+          value: $(tt.params.push-ref)
+        - name: mr-oldrev
+          value: $(tt.params.mr-oldrev)
+        - name: mr-iid
+          value: $(tt.params.mr-iid)
+        pipelineRef:
+          name: tekton-gl-proto-pipeline
+        timeout: 1h
+        serviceAccountName: tekton-gl-proto-sa
+- apiVersion: tekton.dev/v1beta1
+  kind: Pipeline
+  metadata:
+    name: tekton-gl-proto-pipeline
+  spec:
+    params:
+    - name: event-type
+    - name: project-id
+    - name: push-ref
+    - name: mr-oldrev
+    - name: mr-iid
+    tasks:
+    - name: qontract-reconcile
+      params:
+      - name: event-type
+        value: $(params.event-type)
+      - name: project-id
+        value: $(params.project-id)
+      - name: push-ref
+        value: $(params.push-ref)
+      - name: mr-oldrev
+        value: $(params.mr-oldrev)
+      - name: mr-iid
+        value: $(params.mr-iid)
+      taskRef:
+        name: qontract-reconcile
+    - name: tf-executor
+      taskRef:
+        name: tf-executor
+parameters: null
