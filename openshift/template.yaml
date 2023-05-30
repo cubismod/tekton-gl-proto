@@ -1,21 +1,22 @@
+# run terraform repo jobs on merges to a master repo
 apiVersion: template.openshift.io/v1
 kind: Template
 metadata:
-  name: tekton-gl-proto-template
+  name: tf-repo-build-master
 objects:
 - apiVersion: triggers.tekton.dev/v1beta1
   kind: EventListener
   metadata:
     annotations:
       triggers.tekton.dev/old-escape-quotes: 'true'
-    name: tekton-gl-proto-listener
+    name: tf-repo-build-master-listener
   spec:
     triggers:
-    - triggerRef: tekton-gl-proto-trigger
+    - triggerRef: tf-repo-build-master-trigger
 - apiVersion: triggers.tekton.dev/v1beta1
   kind: Trigger
   metadata:
-    name: tekton-gl-proto-trigger
+    name: tf-repo-build-master-trigger
   spec:
     interceptors:
     - ref:
@@ -23,101 +24,96 @@ objects:
       params:
       - name: secretRef
         value:
-          secretName: tekton-gl-proto-secret
+          secretName: tf-repo-build-master-secret
           secretKey: pass
         eventTypes:
         - Push Hook
-        - Merge Request Hook
     bindings:
     - ref:
-        name: tekton-gl-proto-binding
+        name: tf-repo-build-master-binding
     template:
-      ref: tekton-gl-proto-trigger-template
+      ref: tf-repo-build-master-trigger-template
 - apiVersion: triggers.tekton.dev/v1beta1
   kind: TriggerBinding
   metadata:
-    name: tekton-gl-proto-binding
+    name: tf-repo-build-master-binding
   # refer here: https://docs.gitlab.com/ee/user/project/integrations/webhook_events.html#push-events
   # for what information gitlab sends in webhooks
+  # these params are used to validate that the webhook is coming from a master push from the correct
+  # gitlab project id
   spec:
     params:
-    - name: event-type
-      value: $(body.event_type)
     - name: project-id
       value: $(body.project.id)
-    - name: push-ref
+    - name: ref
       value: $(body.ref)
-    # https://docs.gitlab.com/ee/user/project/integrations/webhook_events.html#merge-request-events
-    - name: mr-oldrev
-      value: $(body.object_attributes.oldrev)
-    - name: mr-iid
-      value: $(body.object_attributes.iid)
-    - name: 
 - apiVersion: triggers.tekton.dev/v1beta1
   kind: TriggerTemplate
   metadata:
-    name: tekton-gl-proto-trigger-template
+    name: tf-repo-build-master-trigger-template
   spec:
     params:
-    - name: event-type
-      description: merge_request or push
-      default: invalid
     - name: project-id
       description: The GitLab project id
     - name: push-ref
       description: Ref including branch
-    - name: mr-oldrev
-      description: Is only available if there are actual code changes to the MR
-    - name: mr-iid
-      description: Internal ID for the merge request
     resourceTemplates:
     - apiVersion: tekton.dev/v1beta1
       kind: PipelineRun
       metadata:
-        name: tekton-gl-proto-pipelinerun-$(uid)
+        generateName: tf-repo-build-master-pipelinerun
       spec:
         params:
-        - name: event-type
-          value: $(tt.params.event-type)
         - name: project-id
           value: $(tt.params.project-id)
-        - name: push-ref
-          value: $(tt.params.push-ref)
-        - name: mr-oldrev
-          value: $(tt.params.mr-oldrev)
-        - name: mr-iid
-          value: $(tt.params.mr-iid)
+        - name: ref
+          value: $(tt.params.ref)
         pipelineRef:
-          name: tekton-gl-proto-pipeline
+          name: tf-repo-build-master-pipeline
         timeout: 1h
-        serviceAccountName: tekton-gl-proto-sa
+        serviceAccountName: tf-repo-build-master-sa
 - apiVersion: tekton.dev/v1beta1
   kind: Pipeline
   metadata:
-    name: tekton-gl-proto-pipeline
+    name: tf-repo-build-master-pipeline
   spec:
     params:
-    - name: event-type
     - name: project-id
-    - name: push-ref
-    - name: mr-oldrev
-    - name: mr-iid
+    - name: ref
     tasks:
     - name: qontract-reconcile
-      params:
-      - name: event-type
-        value: $(params.event-type)
-      - name: project-id
-        value: $(params.project-id)
-      - name: push-ref
-        value: $(params.push-ref)
-      - name: mr-oldrev
-        value: $(params.mr-oldrev)
-      - name: mr-iid
-        value: $(params.mr-iid)
-      taskRef:
+      when:
+        # these guards are in place to ensure that only master pushes from the correct project
+        # will trigger a terraform repo run
+        - input: "$(params.project-id)"
+          operator: in
+          values: ["${VALID_PROJECT_ID}"]
+        - input: "$(params.ref)"
+          operator: in
+          values: ["${VALID_WEBHOOK_REF}"]
+      taskSpec:
         name: qontract-reconcile
+        image: "${QR_IMAGE}:${QR_IMAGE_TAG}"
+        script: |
+          #!/usr/bin/env bash
+          echo -n "${EXAMPLE_JSON_OUT}" | tee $(results.out)
     - name: tf-executor
       taskRef:
         name: tf-executor
-parameters: null
+parameters:
+  - name: VALID_WEBHOOK_REF
+    description: Limit Pipelines to only execute from pushes to this git ref
+    value: refs/heads/master
+  - name: VALID_PROJECT_ID
+    description: Limit Pipelines to only execute from pushes to this git project ID
+    value: "7"
+  - name: QR_IMAGE
+    value: quay.io/app-sre/ubi8-ubi-minimal
+  - name: QR_IMAGE_TAG
+    value: latest
+  - name: TF_REPO_EXECUTOR
+    value: quay.io/app-sre/terraform-repo-executor
+  - name: TF_REPO_EXECUTOR_TAG
+    value: latest
+  - name: EXAMPLE_JSON_OUT
+    value: "{\"delete\":false,\"dry_run\":true,\"name\":\"my_cool_repo\",\"project_path\":\"plan_a\",\"ref\":\"a390f5cb20322c90861d6d80e9b70c6a579be1d0\",\"repository\":\"https://gitlab.example.com/terraform/tf-repo-example\",\"secret\":{\"path\":\"vault/creds/terraform/app-int-example-01/config\",\"version\":null}}"
