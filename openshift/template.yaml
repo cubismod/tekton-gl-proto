@@ -2,104 +2,137 @@
 apiVersion: template.openshift.io/v1
 kind: Template
 metadata:
-  name: tf-repo-build-master
+  name: tf-repo-push-deploy
 objects:
-- apiVersion: triggers.tekton.dev/v1beta1
-  kind: EventListener
-  metadata:
-    annotations:
-      triggers.tekton.dev/old-escape-quotes: 'true'
-    name: tf-repo-build-master-listener
-  spec:
-    triggers:
-    - triggerRef: tf-repo-build-master-trigger
-- apiVersion: triggers.tekton.dev/v1beta1
-  kind: Trigger
-  metadata:
-    name: tf-repo-build-master-trigger
-  spec:
-    interceptors:
-    - ref:
-        name: gitlab
+  - apiVersion: triggers.tekton.dev/v1beta1
+    kind: EventListener
+    metadata:
+      annotations:
+        triggers.tekton.dev/old-escape-quotes: "true"
+      name: tf-repo-push-deploy-listener
+    spec:
+      triggers:
+        - triggerRef: tf-repo-push-deploy-trigger
+  - apiVersion: triggers.tekton.dev/v1beta1
+    kind: Trigger
+    metadata:
+      name: tf-repo-push-deploy-trigger
+    spec:
+      interceptors:
+        - ref:
+            name: gitlab
+          params:
+            - name: secretRef
+              value:
+                secretName: tf-repo-push-deploy-secret
+                secretKey: pass
+              eventTypes:
+                - Push Hook
+      bindings:
+        - ref:
+            name: tf-repo-push-deploy-binding
+      template:
+        ref: tf-repo-push-deploy-trigger-template
+  - apiVersion: triggers.tekton.dev/v1beta1
+    kind: TriggerBinding
+    metadata:
+      name: tf-repo-push-deploy-binding
+    # refer here: https://docs.gitlab.com/ee/user/project/integrations/webhook_events.html#push-events
+    # for what information gitlab sends in webhooks
+    # these params are used to validate that the webhook is coming from a master push from the correct
+    # gitlab project id
+    spec:
       params:
-      - name: secretRef
-        value:
-          secretName: tf-repo-build-master-secret
-          secretKey: pass
-        eventTypes:
-        - Push Hook
-    bindings:
-    - ref:
-        name: tf-repo-build-master-binding
-    template:
-      ref: tf-repo-build-master-trigger-template
-- apiVersion: triggers.tekton.dev/v1beta1
-  kind: TriggerBinding
-  metadata:
-    name: tf-repo-build-master-binding
-  # refer here: https://docs.gitlab.com/ee/user/project/integrations/webhook_events.html#push-events
-  # for what information gitlab sends in webhooks
-  # these params are used to validate that the webhook is coming from a master push from the correct
-  # gitlab project id
-  spec:
-    params:
-    - name: project-id
-      value: $(body.project.id)
-    - name: ref
-      value: $(body.ref)
-- apiVersion: triggers.tekton.dev/v1beta1
-  kind: TriggerTemplate
-  metadata:
-    name: tf-repo-build-master-trigger-template
-  spec:
-    params:
-    - name: project-id
-      description: The GitLab project id
-    - name: push-ref
-      description: Ref including branch
-    resourceTemplates:
-    - apiVersion: tekton.dev/v1beta1
-      kind: PipelineRun
-      metadata:
-        generateName: tf-repo-build-master-pipelinerun
-      spec:
-        params:
         - name: project-id
-          value: $(tt.params.project-id)
+          value: $(body.project.id)
         - name: ref
-          value: $(tt.params.ref)
-        pipelineRef:
-          name: tf-repo-build-master-pipeline
-        timeout: 1h
-        serviceAccountName: tf-repo-build-master-sa
-- apiVersion: tekton.dev/v1beta1
-  kind: Pipeline
-  metadata:
-    name: tf-repo-build-master-pipeline
-  spec:
-    params:
-    - name: project-id
-    - name: ref
-    tasks:
-    - name: qontract-reconcile
-      when:
-        # these guards are in place to ensure that only master pushes from the correct project
-        # will trigger a terraform repo run
-        - input: "$(params.project-id)"
-          operator: in
-          values: ["${VALID_PROJECT_ID}"]
-        - input: "$(params.ref)"
-          operator: in
-          values: ["${VALID_WEBHOOK_REF}"]
-      taskSpec:
-        name: qontract-reconcile
-        image: "${QR_IMAGE}:${QR_IMAGE_TAG}"
-        script: |
-          #!/usr/bin/env bash
-          echo -n "${EXAMPLE_JSON_OUT}" | tee $(results.out)
-    - name: tf-executor
-      taskRef:
-        name: tf-executor
+          value: $(body.ref)
+  - apiVersion: triggers.tekton.dev/v1beta1
+    kind: TriggerTemplate
+    metadata:
+      name: tf-repo-push-deploy-trigger-template
+    spec:
+      params:
+        - name: project-id
+          description: The GitLab project id
+        - name: push-ref
+          description: Ref including branch
+      resourceTemplates:
+        - apiVersion: tekton.dev/v1beta1
+          kind: PipelineRun
+          metadata:
+            generateName: tf-repo-push-deploy-pipelinerun
+          spec:
+            params:
+              - name: project-id
+                value: $(tt.params.project-id)
+              - name: ref
+                value: $(tt.params.ref)
+            pipelineRef:
+              name: tf-repo-push-deploy-pipeline
+            timeout: 1h
+            serviceAccountName: tf-repo-push-deploy-sa
+  - apiVersion: tekton.dev/v1beta1
+    kind: Pipeline
+    metadata:
+      name: tf-repo-push-deploy-pipeline
+    spec:
+      params:
+        - name: project-id
+        - name: ref
+      tasks:
+        - name: tf-repo-push-deploy-task
+          when:
+            # these guards are in place to ensure that only master pushes from the correct project
+            # will trigger a terraform repo run
+            - input: "$(params.project-id)"
+              operator: in
+              values: ["${VALID_PROJECT_ID}"]
+            - input: "$(params.ref)"
+              operator: in
+              values: ["${VALID_WEBHOOK_REF}"]
+          taskSpec:
+            workspaces:
+              - name: qr-output
+                emptyDir: {}
+            steps:
+              - name: qontract-reconcile
+                image: "${QR_IMAGE}:${QR_IMAGE_TAG}"
+                onError: stopAndFail
+                script: |
+                  #!/usr/bin/env bash
+                  echo -n "${EXAMPLE_JSON_OUT}" | tee $(workspaces.qr-output.path)/repo.json
+              - name: tf-executor
+                image: "${TF_REPO_EXECUTOR}:{TF_REPO_EXECUTOR_TAG}"
+                env:
+                  - name: CONFIG_FILE
+                    value: $(workspaces.qr-output.path)/repo.json
+                  - name: WORKDIR
+                    value: /tf-repo
+                  - name: GITLAB_USERNAME
+                    valueFrom:
+                      secretKeyRef:
+                        name: tf-repo-executor
+                        key: gitlab.username
+                  - name: GITLAB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: tf-repo-executor
+                        key: gitlab.token
+                  - name: VAULT_ADDR
+                    valueFrom:
+                      secretKeyRef:
+                        name: tf-repo-executor
+                        key: vault.addr
+                  - name: VAULT_ROLE_ID
+                    valueFrom:
+                      secretKeyRef:
+                        name: tf-repo-executor
+                        key: vault.role-id
+                  - name: VAULT_SECRET_ID
+                    valueFrom:
+                      name: tf-repo-executor
+                      key: vault.secret-id
 parameters:
   - name: VALID_WEBHOOK_REF
     description: Limit Pipelines to only execute from pushes to this git ref
@@ -116,4 +149,4 @@ parameters:
   - name: TF_REPO_EXECUTOR_TAG
     value: latest
   - name: EXAMPLE_JSON_OUT
-    value: "{\"delete\":false,\"dry_run\":true,\"name\":\"my_cool_repo\",\"project_path\":\"plan_a\",\"ref\":\"a390f5cb20322c90861d6d80e9b70c6a579be1d0\",\"repository\":\"https://gitlab.example.com/terraform/tf-repo-example\",\"secret\":{\"path\":\"vault/creds/terraform/app-int-example-01/config\",\"version\":null}}"
+    value: '{"delete":false,"dry_run":true,"name":"my_cool_repo","project_path":"plan_a","ref":"a390f5cb20322c90861d6d80e9b70c6a579be1d0","repository":"https://gitlab.example.com/terraform/tf-repo-example","secret":{"path":"vault/creds/terraform/app-int-example-01/config","version":null}}'
