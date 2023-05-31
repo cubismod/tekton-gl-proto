@@ -1,4 +1,8 @@
 # run terraform repo jobs on merges to a master repo
+# still to figure out: 
+# 1.  how to expose the EventListener via an OpenShift route such that
+#     GitLab can talk to it
+# 2.  QR bits
 apiVersion: template.openshift.io/v1
 kind: Template
 metadata:
@@ -11,6 +15,7 @@ objects:
         triggers.tekton.dev/old-escape-quotes: "true"
       name: tf-repo-push-deploy-listener
     spec:
+      serviceAccountName: tf-repo-push-deploy-sa
       triggers:
         - triggerRef: tf-repo-push-deploy-trigger
   - apiVersion: triggers.tekton.dev/v1beta1
@@ -22,11 +27,14 @@ objects:
         - ref:
             name: gitlab
           params:
+            # the content of this secret token needs to be configured on the gitlab end as well
+            # as a "Secret token"
             - name: secretRef
               value:
-                secretName: tf-repo-push-deploy-secret
-                secretKey: pass
-              eventTypes:
+                secretName: tf-repo-push-deploy-gitlab
+                secretKey: secret
+            - name: eventTypes
+              value:
                 - Push Hook
       bindings:
         - ref:
